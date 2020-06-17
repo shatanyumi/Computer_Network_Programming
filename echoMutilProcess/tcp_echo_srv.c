@@ -1,32 +1,41 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include <string.h>
 #include <unistd.h>
-#include <sys/socket.h>
-#include <netinet/in.h>
-#include <arpa/inet.h>
+#include <string.h>
 #include <signal.h>
+#include <sys/wait.h>
 #include <errno.h>
-#include <wait.h>
+#include <sys/socket.h>
+#include <netdb.h>
+#include <arpa/inet.h>
 
 #define MAX_CMD_STR 124
+#define LISTENQ 1024
 
 typedef struct sockaddr *pSA ;
+
 int sig_to_exit = 0;
 int sig_type = 0;
-FILE *stu_srv_res_p;
 
-typedef struct PDU{
-    int PIN;
-    int LEN;
-    char BUF[MAX_CMD_STR+1];
-}pdu;
+void unix_error(char *msg){
+    fprintf(stderr,"%s %s",msg,strerror(errno));
+    exit(0);
+}
+
+void Close(int fd){
+    if(close(fd)<0)
+        unix_error("Close error");
+}
+
+void Fclose(FILE *fp){
+    if(fclose(fp)!=0)
+        unix_error("Fclose error");
+}
 
 void sig_chld(int signo){
     sig_type = signo;
     pid_t pid_chld;
-    int stat;
-    while(0 < (pid_chld = waitpid(-1, &stat, WNOHANG)));
+    while(0 < (pid_chld = waitpid(-1, 0, WNOHANG)));
     printf("[srv](%d) server child(%d) terminated.\n",getpid(),pid_chld);
 }
 
@@ -41,60 +50,157 @@ void sig_pipe(int signo) {
     printf("[srv](%d) SIGPIPE is coming!\n",getpid());
 }
 
-int echo_rep(int sockfd,FILE *fp_res,pid_t pid) {
-    char buffer[MAX_CMD_STR];
-    int pin = -1;
-    pdu echo_rev_pdu;
-    if(read(sockfd,&echo_rev_pdu,sizeof(pdu))==-1){
-        printf("[srv](%d) echo_rep read error\n",pid);
-        exit(1);
+__sighandler_t *Signal(int signum,__sighandler_t sighandler){
+    struct sigaction sigact, old_sigact;
+    sigact.sa_handler = sighandler;
+    sigemptyset(&sigact.sa_mask);
+    sigact.sa_flags = 0;
+    sigact.sa_flags |= SA_RESTART;
+    if(sigaction(SIGPIPE, &sigact, &old_sigact)<0)
+        unix_error("Signal error");
+    return (old_sigact.sa_handler);
+}
+
+FILE *Fopen(const char *filename,const char *mode){
+    FILE *fp;
+    if((fp = fopen(filename,mode))==NULL)
+        unix_error("Fopen error");
+    return fp;
+}
+
+void Fwrite(const char *buffer,FILE *stream){
+    if(fputs(buffer,stream)<0)
+        unix_error("Fwrite error");
+}
+
+int open_listenfd(char *ip,char *port,FILE *file){
+    int listenfd, optval=1;
+    struct sockaddr_in srv_addr;
+    char buf[MAX_CMD_STR];
+
+    if((listenfd = socket(AF_INET,SOCK_STREAM,0))<0)
+        return -1;
+    if (setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR,
+                   (const void *)&optval , sizeof(int)) < 0)
+        return -1;
+
+    bzero(&srv_addr,sizeof(srv_addr));
+    srv_addr.sin_family = AF_INET;
+    inet_pton(AF_INET,ip,&srv_addr.sin_addr);
+    srv_addr.sin_port = htons(atoi(port));
+
+    // 在bind之前打印输出监听情况
+    sprintf(buf,"[srv](%d) server[%s:%s] is initializing!\n",getpid(),ip,port);
+    Fwrite(buf,file);
+
+    if(bind(listenfd,(pSA)&srv_addr,sizeof(struct sockaddr_in)) == -1)
+        return -1;
+
+    if(listen(listenfd,LISTENQ) == -1)
+        return -1;
+
+    return listenfd;
+}
+
+int Open_listenfd(char *ip,char *port,FILE *file){
+    int rc;
+    if((rc = open_listenfd(ip,port,file))<0)
+        unix_error("Open_listenfd");
+    return rc;
+}
+
+int Accept(int fd,struct sockaddr *addr,socklen_t *addrlen){
+    int rc;
+    if((rc = accept(fd,addr,addrlen))<0)
+        unix_error("Accept error");
+    return rc;
+}
+
+pid_t Fork(){
+    pid_t pid;
+
+    if((pid = fork())<0)
+        unix_error("Fork error");
+    return pid;
+}
+
+
+void Rename(char *oldname, char *newname, FILE *stream, pid_t pid) {
+
+    if(rename(oldname,newname)<0)
+        unix_error("Rename error");
+
+    char buf[MAX_CMD_STR];
+    memset(buf,0,sizeof(buf));
+    sprintf(buf,"[srv](%d) res file rename done!\n",pid);
+    Fwrite(buf,stream);
+}
+
+void echo(int sockfd,FILE *fp_res,pid_t pid,int *pin) {
+    int res;
+    int len;
+    char *buf;
+
+    if(read(sockfd,&pin,sizeof(int))<0){
+        printf("[srv](%d) read pin return %d and errno is %d\n",pid,res, errno);
+        if(errno == EINTR){
+            if(sig_type == SIGINT){
+                return;
+            }
+        }
     }
 
+    if(read(sockfd,&len,sizeof(int))<0){
+        printf("[srv](%d) read len return %d and errno is %d\n",pid,res, errno);
+        if(errno == EINTR){
+            if(sig_type == SIGINT)
+                return;
+        }
+    }
+
+    buf = (char *)malloc(sizeof(char)*len);
+    if(read(sockfd,buf,sizeof(char)*len)<0){
+        printf("[srv](%d) read buf return %d and errno is %d\n",pid,res, errno);
+        if(errno == EINTR){
+            if(sig_type == SIGINT) {
+                free(buf);
+                return;
+            }
+        }
+        free(buf);
+    }
+
+    printf("%s\n",buf);
+    char buffer[MAX_CMD_STR+124];
     memset(buffer,0,sizeof(buffer));
-    sprintf(buffer,"[echo_rqt](%d) %s",pid,echo_rev_pdu.BUF);
-    pin = echo_rev_pdu.PIN;
-    fputs(buffer,fp_res);
+    sprintf(buffer,"[echo_rqt](%d) %s",pid,buf);
+    Fwrite(buffer,fp_res);
 
-    if(write(sockfd,&echo_rev_pdu,sizeof(pdu))==-1){
-        printf("[srv](%d) echo_rep write error\n",pid);
+    if(write(sockfd,&pin,sizeof(int)) == -1){
+        printf("write echo_rqt_pdu.HEADER.PIN error \n");
         exit(1);
     }
 
-    return pin;
+    if(write(sockfd,&len,sizeof(int)) == -1){
+        printf("write echo_rqt_pdu.HEADER.LEN error \n");
+        exit(1);
+    }
+
+    if(write(sockfd,&buf,sizeof(char)*len) == -1){
+        printf("write echo_rqt_pdu.BUF error \n");
+        exit(1);
+    }
 }
 
 int main(int argc,char *argv[])
 {
-    char cli_ip[32];
-    FILE *fp_res;
     struct sockaddr_in srv_addr,cli_addr;
     socklen_t cli_addr_len;
     int listenfd,connfd;
-    char buf[MAX_CMD_STR];
 
-    // 安装SIGPIPE信号处理器
-    struct sigaction sigact_pipe, old_sigact_pipe;
-    sigact_pipe.sa_handler = sig_pipe;
-    sigemptyset(&sigact_pipe.sa_mask);
-    sigact_pipe.sa_flags = 0;
-    sigact_pipe.sa_flags |= SA_RESTART;
-    sigaction(SIGPIPE, &sigact_pipe, &old_sigact_pipe);
-
-    // 安装SIGINT信号处理器
-    struct sigaction sigact_int,old_sigact_int;
-    sigact_int.sa_handler = sig_int;
-    sigemptyset(&sigact_int.sa_mask);
-    sigact_int.sa_flags = 0;
-    sigact_pipe.sa_flags |= SA_RESTART;
-    sigaction(SIGINT,&sigact_int,&old_sigact_int);
-
-    //安装SIG_IGN信号处理器
-    struct sigaction sigact_chld, old_sigact_chld;
-    sigact_chld.sa_handler = sig_chld;
-    sigemptyset(&sigact_chld.sa_mask);
-    sigact_chld.sa_flags = 0;
-    sigaction(SIGCHLD, &sigact_chld, &old_sigact_chld);
-
+    Signal(SIGPIPE,sig_pipe);
+    Signal(SIGINT,sig_int);
+    Signal(SIGCHLD,sig_chld);
 
     if(argc != 3){
         printf("Usage: server <IPaddress><Port>");
@@ -102,112 +208,71 @@ int main(int argc,char *argv[])
     }
 
     // 父进程启动以前打开 stu_srv_res_p.txt
-    char stu_srv_res_p_filename[20];
-    sprintf(stu_srv_res_p_filename,"%s","stu_srv_res_p.txt");
-    printf("[srv](%d) stu_srv_res_p.txt is opened!\n",getpid());
-    stu_srv_res_p = fopen(stu_srv_res_p_filename,"wb");
-    if(stu_srv_res_p == NULL){
-        printf("stu_srv_res_p.txt open failed!\n");
-        exit(1);
-    }
+    FILE *stu_srv_res_p = Fopen("stu_srv_res_p.txt","wb");
 
-    bzero(&srv_addr,sizeof(srv_addr));
-    srv_addr.sin_family = AF_INET;
-    inet_pton(AF_INET,argv[1],&srv_addr.sin_addr);
-    srv_addr.sin_port = htons(atoi(argv[2]));
-
-    listenfd = socket(AF_INET,SOCK_STREAM,0);
-    if( listenfd== -1){
-        printf("[srv] socket error\n");
-        exit(1);
-    }
-
-    // 在bind之前打印输出监听情况
-    char srv_ip[32];
-    memset(buf,0,sizeof(buf));
-    inet_ntop(AF_INET, &srv_addr.sin_addr,srv_ip, sizeof(srv_ip));
-    sprintf(buf,"[srv](%d) server[%s:%hu] is initializing!\n",getpid(),srv_ip,ntohs(srv_addr.sin_port));
-    fputs(buf,stu_srv_res_p);
-
-    if(bind(listenfd,(pSA)&srv_addr,sizeof(struct sockaddr_in)) == -1){
-        printf("[srv] bind error\n");
-        exit(1);
-    }
-
-    if(listen(listenfd,100) == -1){
-        printf("[srv] listen error\n");
-        exit(1);
-    }
-
+    listenfd = Open_listenfd(argv[1],argv[2],stu_srv_res_p);
+    char cli_ip[32];
+    char buf[MAX_CMD_STR];
     while(!sig_to_exit)
     {
         cli_addr_len = sizeof(cli_addr);
-        connfd = accept(listenfd,(pSA)&cli_addr,&cli_addr_len);
+        connfd = Accept(listenfd,(pSA)&cli_addr,&cli_addr_len);
         if(connfd == -1 && errno == EINTR && sig_type == SIGINT) break;
 
         memset(cli_ip,0,sizeof(cli_ip));
         memset(buf,0,sizeof(buf));
         inet_ntop(AF_INET, &cli_addr.sin_addr,cli_ip, sizeof(cli_ip));
         sprintf(buf,"[srv](%d) client[%s:%hu] is accepted!",getpid(),cli_ip,ntohs(cli_addr.sin_port));
-        fputs(buf,stu_srv_res_p);
+        Fwrite(buf,stu_srv_res_p);
 
-        if(fork() == 0){
-            char fn_res[20];
+        if(Fork()==0){
+            Close(listenfd);
+
+            char fn_res[50];
             pid_t child_pid = getpid();
             memset(fn_res,0,sizeof(fn_res));
             sprintf(fn_res,"stu_srv_res_%d.txt",child_pid);
-            fp_res = fopen(fn_res,"wb");
+            FILE *fp_res = Fopen(fn_res,"wb");
             printf("[srv](%d) %s is opened!\n",child_pid,fn_res);
 
+            memset(buf,0,sizeof(buf));
+            sprintf(buf,"[cli](%d) child process is created!\n",child_pid);
+            Fwrite(buf,fp_res);
 
-            char buffer_fn_res[MAX_CMD_STR];
-            memset(buffer_fn_res,0,sizeof(buffer_fn_res));
-            sprintf(buffer_fn_res,"[cli](%d) child process is created!",child_pid);
-            fputs(buffer_fn_res,fp_res);
+            int PIN;
+            echo(connfd,fp_res,child_pid,&PIN);
 
-            int PIN = echo_rep(connfd,fp_res,child_pid);
-            if(PIN == -1){
-                printf("[srv](%d) echo_rep failed!\n",child_pid);
-                exit(1);
-            }
-
-            char fn_res_new[20];
+            char fn_res_new[50];
             memset(fn_res_new,0,sizeof(fn_res_new));
             sprintf(fn_res_new,"stu_srv_res_%d.txt",PIN);
-            if(rename(fn_res,fn_res_new) == 0){
-                memset(buffer_fn_res,0,sizeof(buffer_fn_res));
-                sprintf(buffer_fn_res,"[srv](%d) res file rename done!",child_pid);
-                fputs(buffer_fn_res,fp_res);
-            }
-            else{
-                printf("rename error\n");
-                exit(1);
-            }
 
-            memset(buffer_fn_res,0,sizeof(buffer_fn_res));
-            sprintf(buffer_fn_res,"[srv](%d) connfd is closed!",child_pid);
-            fputs(buffer_fn_res,fp_res);
-            close(connfd);
+            Rename(fn_res, fn_res_new, fp_res, child_pid);
 
-            memset(buffer_fn_res,0,sizeof(buffer_fn_res));
-            sprintf(buffer_fn_res,"[cli](%d) child process is going to exit!",child_pid);
-            fputs(buffer_fn_res,fp_res);
-            fclose(fp_res);
+            memset(buf,0,sizeof(buf));
+            sprintf(buf,"[srv](%d) connfd is closed!\n",child_pid);
+            Fwrite(buf,fp_res);
+            Close(connfd);
+
+            memset(buf,0,sizeof(buf));
+            sprintf(buf,"[cli](%d) child process is going to exit!\n",child_pid);
+            Fwrite(buf,fp_res);
+            Fclose(fp_res);
 
             printf("[srv](%d) stu_cli_res%d.txt is closed!\n",child_pid,child_pid);
             exit(0);
         }
+        Close(connfd);
     }
-    close(listenfd);
+    Close(listenfd);
     memset(buf,0,sizeof(buf));
-    sprintf(buf,"[srv](%d) listenfd is closed!",getpid());
-    fputs(buf,stu_srv_res_p);
+    sprintf(buf,"[srv](%d) listenfd is closed!\n",getpid());
+    Fwrite(buf,stu_srv_res_p);
 
     memset(buf,0,sizeof(buf));
-    sprintf(buf,"[srv](%d) parent process is going to exit!",getpid());
-    fputs(buf,stu_srv_res_p);
+    sprintf(buf,"[srv](%d) parent process is going to exit!\n",getpid());
+    Fwrite(buf,stu_srv_res_p);
 
-    fclose(stu_srv_res_p);
-    printf("[srv])(%d) %s is closed!\n",getpid(),stu_srv_res_p_filename);
+    Fclose(stu_srv_res_p);
+    printf("[srv])(%d) stu_srv_res_p.txt is closed!\n",getpid());
     return 0;
 }

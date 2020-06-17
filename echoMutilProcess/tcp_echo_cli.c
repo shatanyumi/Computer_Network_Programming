@@ -7,20 +7,24 @@
 #include <arpa/inet.h>
 #include <errno.h>
 
-#define MAX_CMD_STR 100
+#define MAX_CMD_STR 124
 
 typedef struct sockaddr* pSA;
 
-typedef struct PDU{
+typedef struct header_st{
     int PIN;
     int LEN;
+}header;
+
+typedef struct PDU{
+    header HEADER;
     char BUF[MAX_CMD_STR+1];
 }pdu;
 
 // 业务逻辑处理函数
 int echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres) {
     char buf[MAX_CMD_STR+1];
-    char td_name[MAX_CMD_STR];
+    char td_name[50];
     pdu echo_rqt_pdu,echo_rep_pdu;
 
     sprintf(td_name,"td%d.txt",pin);
@@ -34,21 +38,41 @@ int echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres) {
         if(strncmp(buf,"exit",4) == 0) return 0;
         int len = strnlen(buf,MAX_CMD_STR);
         buf[len] = '\0';
+        printf("%s\n",buf);
         // 构建pdu
-        echo_rqt_pdu.PIN = pin;
-        echo_rqt_pdu.LEN = len;
-        strcpy(echo_rqt_pdu.BUF,buf);
+        echo_rqt_pdu.HEADER.PIN = pin;
+        echo_rqt_pdu.HEADER.LEN = len;
+        strcpy(buf,echo_rqt_pdu.BUF);
 
-        if(write(sockfd,&echo_rqt_pdu,sizeof(pdu)) == -1){
-            printf("write echo_rqt_pdu error \n");
+        if(write(sockfd,&echo_rqt_pdu.HEADER.PIN,sizeof(int)) == -1){
+            printf("write echo_rqt_pdu.HEADER.PIN error \n");
             exit(1);
         }
-        if(read(sockfd,&echo_rep_pdu,sizeof(pdu)) == -1){
-            printf("[cli] read echo_rep_pdu error \n");
+        if(write(sockfd,&echo_rqt_pdu.HEADER.LEN,sizeof(int)) == -1){
+            printf("write echo_rqt_pdu.HEADER.LEN error \n");
+            exit(1);
+        }
+        if(write(sockfd,&echo_rqt_pdu.BUF,sizeof(char)*echo_rqt_pdu.HEADER.LEN) == -1){
+            printf("write echo_rqt_pdu.BUF error \n");
             exit(1);
         }
 
-        char res[MAX_CMD_STR+8];
+        if(read(sockfd,&echo_rep_pdu.HEADER.PIN,sizeof(int)) == -1){
+            printf("read echo_rep_pdu.HEADER.PIN error \n");
+            exit(1);
+        }
+
+        if(read(sockfd,&echo_rep_pdu.HEADER.LEN,sizeof(int)) == -1){
+            printf("read echo_rep_pdu.HEADER.LEN error \n");
+            exit(1);
+        }
+
+        if(read(sockfd,&echo_rep_pdu.BUF,sizeof(char)*echo_rep_pdu.HEADER.LEN) == -1){
+            printf("write echo_rep_pdu.HEADER.PIN error \n");
+            exit(1);
+        }
+
+        char res[MAX_CMD_STR+124];
         sprintf(res,"[echo_rep](%d) %s",PID,echo_rep_pdu.BUF);
         fputs(res,fnres);
     }
@@ -82,7 +106,8 @@ int main(int argc,char *argv[])
 
     pid_t pid;
     int pin;
-    char buf[MAX_CMD_STR];
+    char buf[MAX_CMD_STR+124];
+
     for(pin= mutl_num-1;pin>0;pin--){
         pid = fork();
         if(pid == -1|| pid == 0) break;
@@ -95,7 +120,7 @@ int main(int argc,char *argv[])
     else if(pid == 0){
         pid_t PID = getpid();
         //printf("子进程 %d\n",pin);
-        char file_name[MAX_CMD_STR];
+        char file_name[50];
         sprintf(file_name,"stu_cli_res_%d.txt",pin);
         printf("[cli](%d) %s is created!\n",PID,file_name);
 
@@ -105,7 +130,7 @@ int main(int argc,char *argv[])
             exit(1);
         }
         memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) child process %d is created!",PID,pin);
+        sprintf(buf,"[cli](%d) child process %d is created!\n",PID,pin);
         fputs(buf,fnres);
 
         do{
@@ -131,6 +156,7 @@ int main(int argc,char *argv[])
         memset(buf,0,sizeof(buf));
         sprintf(buf,"[cli](%d) child process is going to exit!\n",PID);
         fputs(buf,fnres);
+        
         fclose(fnres);
         printf("[cli](%d) %s is closed!\n",PID,file_name);
         exit(0);
@@ -138,7 +164,7 @@ int main(int argc,char *argv[])
     else{
         pid_t PID = getpid();
         //printf("父进程 %d\n",pin);
-        char file_name[MAX_CMD_STR];
+        char file_name[50];
         sprintf(file_name,"stu_cli_res_%d.txt",pin);
         printf("[cli](%d) %s is created!\n",PID,file_name);
 
@@ -148,7 +174,7 @@ int main(int argc,char *argv[])
             exit(1);
         }
         memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) child process %d is created!",PID,pin);
+        sprintf(buf,"[cli](%d) child process %d is created!\n",PID,pin);
         fputs(buf,fnres);
 
         do{
