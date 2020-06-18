@@ -10,7 +10,10 @@
 #include <arpa/inet.h>
 
 #define MAX_CMD_STR 124
-#define LISTENQ 1024
+#define bprintf(fp,format,...)\
+        if(fp==NULL){printf(format,##__VA_ARGS__);}\
+        else {printf(format,##__VA_ARGS__);\
+                fprintf(fp,format,##__VA_ARGS__);fflush(fp);}
 
 typedef struct sockaddr *pSA ;
 typedef void handler_t(int);
@@ -28,6 +31,26 @@ void unix_error(char *msg)
     exit(0);
 }
 
+void sig_chld(int signo)
+{
+    while(waitpid(-1, 0, WNOHANG) >0);
+}
+
+handler_t *Signal(int signum, handler_t *handler)
+{
+    struct sigaction action, old_action;
+
+    action.sa_handler = handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    if(signum != SIGINT)
+        action.sa_flags |= SA_RESTART;
+
+    if (sigaction(signum, &action, &old_action) < 0)
+        unix_error("Signal error");
+    return (old_action.sa_handler);
+}
+
 void Close(int fd)
 {
     if(close(fd)<0)
@@ -40,51 +63,12 @@ void Fclose(FILE *fp)
         unix_error("Fclose error");
 }
 
-void Fputs(const char *buffer,FILE *stream)
-{
-    if(fputs(buffer,stream)==EOF)
-        unix_error("Fwrite error");
-}
-
 int Socket(int domain, int type, int protocol)
 {
     int rc;
 
     if ((rc = socket(domain, type, protocol)) < 0)
         unix_error("Socket error");
-    return rc;
-}
-
-void Setsockopt(int s, int level, int optname, const void *optval, int optlen)
-{
-    int rc;
-
-    if ((rc = setsockopt(s, level, optname, optval, optlen)) < 0)
-        unix_error("Setsockopt error");
-}
-
-void Bind(int sockfd, struct sockaddr *my_addr, int addrlen)
-{
-    int rc;
-
-    if ((rc = bind(sockfd, my_addr, addrlen)) < 0)
-        unix_error("Bind error");
-}
-
-void Listen(int s, int backlog)
-{
-    int rc;
-
-    if ((rc = listen(s,  backlog)) < 0)
-        unix_error("Listen error");
-}
-
-int Accept(int s, struct sockaddr *addr, socklen_t *addrlen)
-{
-    int rc;
-
-    if ((rc = accept(s, addr, addrlen)) < 0)
-        unix_error("Accept error");
     return rc;
 }
 
@@ -111,17 +95,6 @@ pid_t Fork()
     if((pid = fork())<0)
         unix_error("Fork error");
     return pid;
-}
-
-void Rename(char *oldname, char *newname, FILE *stream, pid_t pid)
-{
-    if(rename(oldname,newname)<0)
-        unix_error("Rename error");
-
-    char buf[MAX_CMD_STR];
-    memset(buf,0,sizeof(buf));
-    sprintf(buf,"[srv](%d) res file rename done!\n",pid);
-    Fputs(buf,stream);
 }
 
 ssize_t rio_readn(int fd, void *usrbuf, size_t n)
@@ -208,7 +181,6 @@ void echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres)
 {
     char rbuf[MAX_CMD_STR+20];
     char buf[MAX_CMD_STR+20];
-    char buf_to_file[MAX_CMD_STR+50];
     pdu echo_pdu;
     char td_name[50];
 
@@ -223,8 +195,8 @@ void echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres)
 
         //构造pdu并写入缓存
         memset(&echo_pdu,0,sizeof(echo_pdu));
-        echo_pdu.PIN = pin;
-        echo_pdu.LEN = len;
+        echo_pdu.PIN = htonl(pin);
+        echo_pdu.LEN = htonl(len);
         strncpy(echo_pdu.BUFFER,rbuf,len);
         memset(buf,0,sizeof(buf));
         memcpy(buf,&echo_pdu,sizeof(echo_pdu));
@@ -235,10 +207,9 @@ void echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres)
         Rio_readn(sockfd,buf,sizeof(buf));
         memset(&echo_pdu,0,sizeof(echo_pdu));
         memcpy(&echo_pdu,buf,sizeof(echo_pdu));
-        echo_pdu.BUFFER[echo_pdu.LEN] = '\0';
+        echo_pdu.BUFFER[ntohl(echo_pdu.LEN)] = '\0';
 
-        sprintf(buf_to_file,"[echo_rep](%d) %s",PID,echo_pdu.BUFFER);
-        Fputs(buf_to_file,fnres);
+        bprintf(fnres,"[echo_rep](%d) %s",PID,echo_pdu.BUFFER);
     }
     Fclose(fp);
 }
@@ -248,6 +219,7 @@ int main(int argc,char **argv)
     char *ip,*port,buf[MAX_CMD_STR];
     //最大并发数目
 
+    Signal(SIGCHLD,sig_chld);
     int mutl_num = 0;
     if(argc != 4)
     {
@@ -281,27 +253,18 @@ int main(int argc,char **argv)
         FILE *fnres = Fopen(file_name,"w");
         printf("[cli](%d) %s is created!\n",PID,file_name);
 
-        memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) child process %d is created!\n",PID,pin);
-        Fputs(buf,fnres);
+        bprintf(fnres,"[cli](%d) child process %d is created!\n",PID,pin);
 
         int client_fd = Open_clientfd(ip,port);
 
-        memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) server[%s:%s] is connected!\n",PID,ip,port);
-        Fputs(buf,fnres);
+        bprintf(fnres,"[cli](%d) server[%s:%s] is connected!\n",PID,ip,port);
 
         echo_rqt(client_fd,pin,PID,fnres);
 
         Close(client_fd);
-        memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) connfd is closed!\n",PID);
-        Fputs(buf,fnres);
+        bprintf(fnres,"[cli](%d) connfd is closed!\n",PID);
 
-        memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) child process is going to exit!\n",PID);
-        Fputs(buf,fnres);
-
+        bprintf(fnres,"[cli](%d) child process is going to exit!\n",PID);
         Fclose(fnres);
         printf("[cli](%d) %s is closed!\n",PID,file_name);
         exit(0);
@@ -315,27 +278,18 @@ int main(int argc,char **argv)
         FILE *fnres = Fopen(file_name,"w");
         printf("[cli](%d) %s is created!\n",PID,file_name);
 
-        memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) child process %d is created!\n",PID,pin);
-        Fputs(buf,fnres);
+        bprintf(fnres,"[cli](%d) child process %d is created!\n",PID,pin);
 
         int client_fd = Open_clientfd(ip,port);
 
-        memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) server[%s:%s] is connected!\n",PID,ip,port);
-        Fputs(buf,fnres);
+        bprintf(fnres,"[cli](%d) server[%s:%s] is connected!\n",PID,ip,port);
 
         echo_rqt(client_fd,pin,PID,fnres);
 
         Close(client_fd);
-        memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) connfd is closed!\n",PID);
-        Fputs(buf,fnres);
+        bprintf(fnres,"[cli](%d) connfd is closed!\n",PID);
 
-        memset(buf,0,sizeof(buf));
-        sprintf(buf,"[cli](%d) parent process is going to exit!\n",PID);
-        Fputs(buf,fnres);
-
+        bprintf(fnres,"[cli](%d) parent process is going to exit!\n",PID);
         Fclose(fnres);
         printf("[cli](%d) %s is closed!\n",PID,file_name);
         exit(0);

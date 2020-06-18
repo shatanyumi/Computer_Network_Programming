@@ -11,6 +11,10 @@
 
 #define MAX_CMD_STR 124
 #define LISTENQ 1024
+#define bprintf(fp,format,...)\
+        if(fp==NULL){printf(format,##__VA_ARGS__);}\
+        else {printf(format,##__VA_ARGS__);\
+                fprintf(fp,format,##__VA_ARGS__);fflush(fp);}
 
 typedef struct sockaddr *pSA ;
 typedef void handler_t(int);
@@ -44,12 +48,6 @@ void Fclose(FILE *fp)
         unix_error("Fclose error");
 }
 
-void Fputs(const char *buffer,FILE *stream)
-{
-    if(fputs(buffer,stream)==EOF)
-        unix_error("Fwrite error");
-}
-
 int Socket(int domain, int type, int protocol)
 {
     int rc;
@@ -57,14 +55,6 @@ int Socket(int domain, int type, int protocol)
     if ((rc = socket(domain, type, protocol)) < 0)
         unix_error("Socket error");
     return rc;
-}
-
-void Setsockopt(int s, int level, int optname, const void *optval, int optlen)
-{
-    int rc;
-
-    if ((rc = setsockopt(s, level, optname, optval, optlen)) < 0)
-        unix_error("Setsockopt error");
 }
 
 void Bind(int sockfd, struct sockaddr *my_addr, int addrlen)
@@ -92,56 +82,40 @@ int Accept(int s, struct sockaddr *addr, socklen_t *addrlen)
     return rc;
 }
 
-void Connect(int sockfd, struct sockaddr *serv_addr, int addrlen)
-{
-    int rc;
-
-    if ((rc = connect(sockfd, serv_addr, addrlen)) < 0)
-        unix_error("Connect error");
-}
-
 void sig_chld(int signo)
 {
+    bprintf(stu_srv_res_p,"[srv](%d) SIGCHLD is coming!\n",getpid());
     sig_type = signo;
-    pid_t pid_chld;
-    char buf[MAX_CMD_STR+124];
-    sprintf(buf,"[srv](%d) SIGCHLD is coming!\n",getpid());
-    Fputs(buf,stu_srv_res_p);
-    while((pid_chld = waitpid(-1, 0, WNOHANG)) >0){
-        printf("[srv](%d) server child(%d) terminated.",getpid(),pid_chld);
-    }
+    while(waitpid(-1, 0, WNOHANG) >0);
 }
 
 void sig_int(int signo)
 {
+    bprintf(stu_srv_res_p,"[srv](%d) SIGINT is coming!\n",getpid());
     sig_type = signo;
-    char buf[MAX_CMD_STR+124];
-    sprintf(buf,"[srv](%d) SIGINT is coming!\n",getpid());
-    Fputs(buf,stu_srv_res_p);
-    if(signo == SIGINT) exit(0);
-    sig_to_exit = 1;
+    if(signo == SIGINT)
+        sig_to_exit = 1;
 }
 
 void sig_pipe(int signo)
 {
+    bprintf(stu_srv_res_p,"[srv](%d) SIGPIPE is coming!\n",getpid());
     sig_type = signo;
-    char buf[MAX_CMD_STR+124];
-    sprintf(buf,"[srv](%d) SIGPIPE is coming!\n",getpid());
-    Fputs(buf,stu_srv_res_p);
 }
 
-handler_t *Signal(int signum,handler_t sighandler)
+handler_t *Signal(int signum, handler_t *handler)
 {
-    struct sigaction sigact, old_sigact;
-    sigact.sa_handler = sighandler;
-    sigemptyset(&sigact.sa_mask);
-    sigact.sa_flags = 0;
-    sigact.sa_flags |= SA_RESTART;
+    struct sigaction action, old_action;
 
-    if(sigaction(signum, &sigact, &old_sigact)<0)
+    action.sa_handler = handler;
+    sigemptyset(&action.sa_mask);
+    action.sa_flags = 0;
+    if(signum != SIGINT)
+        action.sa_flags |= SA_RESTART;
+
+    if (sigaction(signum, &action, &old_action) < 0)
         unix_error("Signal error");
-
-    return old_sigact.sa_handler;
+    return (old_action.sa_handler);
 }
 
 FILE *Fopen(const char *filename,const char *mode)
@@ -156,23 +130,18 @@ int open_listenfd(char *ip,char *port)
 {
     int listenfd,optval=1;
     struct sockaddr_in srv_addr;
-    char buf[MAX_CMD_STR];
 
     listenfd = Socket(AF_INET,SOCK_STREAM,0);
 
-    Setsockopt(listenfd, SOL_SOCKET, SO_REUSEADDR,(const void *)&optval , sizeof(int));
     bzero(&srv_addr,sizeof(srv_addr));
     srv_addr.sin_family = AF_INET;
     inet_pton(AF_INET,ip,&srv_addr.sin_addr);
     srv_addr.sin_port = htons(atoi(port));
-
     // 在bind之前打印输出监听情况
-    sprintf(buf,"[srv](%d) server[%s:%s] is initializing!\n",getpid(),ip,port);
-    Fputs(buf,stu_srv_res_p);
-
+    bprintf(stu_srv_res_p,"[srv](%d) server[%s:%s] is initializing!\n",getpid(),ip,port);
     Bind(listenfd,(pSA)&srv_addr,sizeof(struct sockaddr_in));
-    Listen(listenfd,LISTENQ);
 
+    Listen(listenfd,LISTENQ);
     return listenfd;
 }
 
@@ -197,11 +166,7 @@ void Rename(char *oldname, char *newname, FILE *stream, pid_t pid)
 {
     if(rename(oldname,newname)<0)
         unix_error("Rename error");
-
-    char buf[MAX_CMD_STR];
-    memset(buf,0,sizeof(buf));
-    sprintf(buf,"[srv](%d) res file rename done!\n",pid);
-    Fputs(buf,stream);
+    bprintf(stream,"[srv](%d) res file rename done!\n",pid);
 }
 
 ssize_t rio_readn(int fd, void *usrbuf, size_t n)
@@ -261,21 +226,16 @@ void Rio_readn(int fd,char *userbuf,size_t n)
 void echo(int sockfd,FILE *fp_res,pid_t pid,int *PIN)
 {
     char buf[MAX_CMD_STR+20];
-    char buffer_to_file[MAX_CMD_STR+50];
     pdu echo_msg;
 
     memset(buf,0,sizeof(buf));
     while(rio_readn(sockfd,buf,sizeof(buf))>0){
         memset(&echo_msg,0,sizeof(echo_msg));
         memcpy(&echo_msg,buf,sizeof(echo_msg));
-        echo_msg.BUFFER[echo_msg.LEN] = '\0';
-        //printf("%d %d %s\n",echo_msg.PIN,echo_msg.LEN,echo_msg.BUFFER);
-
-        memset(buffer_to_file,0,sizeof(buffer_to_file));
-        sprintf(buffer_to_file,"[echo_rqt](%d) %s",pid,echo_msg.BUFFER);
-        Fputs(buffer_to_file,fp_res);
+        echo_msg.BUFFER[ntohl(echo_msg.LEN)] = '\0';
+        bprintf(fp_res,"[echo_rqt](%d) %s",pid,echo_msg.BUFFER);
         //传址放到函数外去
-        *PIN = echo_msg.PIN;
+        *PIN = ntohl(echo_msg.PIN);
         Rio_writen(sockfd,buf,sizeof(buf));
         memset(buf,0,sizeof(buf));
     }
@@ -299,40 +259,35 @@ int main(int argc,char **argv)
 
     // 父进程启动以前打开 stu_srv_res_p.txt
     stu_srv_res_p = Fopen("stu_srv_res_p.txt","w");
-    printf("[srv](%d) stu_srv_res_p.txt is opened!\n",getpid());
+    bprintf(NULL,"[srv](%d) stu_srv_res_p.txt is opened!\n",getpid());
 
     listenfd = Open_listenfd(argv[1],argv[2]);
     char cli_ip[32];
-    char buf[MAX_CMD_STR];
     while(!sig_to_exit)
     {
         cli_addr_len = sizeof(struct sockaddr_in);
-        connfd = Accept(listenfd,(pSA)&cli_addr,&cli_addr_len);
-        if(connfd == -1 && errno == EINTR && sig_type == SIGINT) continue;
+        connfd = accept(listenfd,(pSA)&cli_addr,&cli_addr_len);
+        if(connfd == -1 && errno == EINTR && sig_type == SIGINT) break;
+        if (connfd < 0) continue;
 
         memset(cli_ip,0,sizeof(cli_ip));
-        memset(buf,0,sizeof(buf));
         inet_ntop(AF_INET, &cli_addr.sin_addr,cli_ip, sizeof(cli_ip));
-        sprintf(buf,"[srv](%d) client[%s:%hu] is accepted!\n",getpid(),cli_ip,ntohs(cli_addr.sin_port));
-        Fputs(buf,stu_srv_res_p);
+        bprintf(stu_srv_res_p,"[srv](%d) client[%s:%hu] is accepted!\n",getpid(),cli_ip,ntohs(cli_addr.sin_port));
 
         if(Fork()==0)
         {
+            Fclose(stu_srv_res_p);
+
             char fn_res[50];
             pid_t child_pid = getpid();
             memset(fn_res,0,sizeof(fn_res));
             sprintf(fn_res,"stu_srv_res_%d.txt",child_pid);
             FILE *fp_res = Fopen(fn_res,"w");
-            printf("[srv](%d) %s is opened!\n",child_pid,fn_res);
-
-            memset(buf,0,sizeof(buf));
-            sprintf(buf,"[cli](%d) child process is created!\n",child_pid);
-            Fputs(buf,fp_res);
+            bprintf(NULL,"[srv](%d) %s is opened!\n",child_pid,fn_res);
+            bprintf(fp_res,"[srv](%d) child process is created!\n",child_pid);
 
             Close(listenfd);
-            memset(buf,0,sizeof(buf));
-            sprintf(buf,"[cli](%d) listenfd is closed!\n",child_pid);
-            Fputs(buf,fp_res);
+            bprintf(fp_res,"[srv](%d) listenfd is closed!\n",child_pid);
 
             int PIN;
             echo(connfd,fp_res,child_pid,&PIN);
@@ -343,31 +298,22 @@ int main(int argc,char **argv)
 
             Rename(fn_res, fn_res_new, fp_res, child_pid);
 
-            memset(buf,0,sizeof(buf));
-            sprintf(buf,"[srv](%d) connfd is closed!\n",child_pid);
-            Fputs(buf,fp_res);
+            bprintf(fp_res,"[srv](%d) connfd is closed!\n",child_pid);
             Close(connfd);
 
-            memset(buf,0,sizeof(buf));
-            sprintf(buf,"[cli](%d) child process is going to exit!\n",child_pid);
-            Fputs(buf,fp_res);
+            bprintf(fp_res,"[srv](%d) child process is going to exit!\n",child_pid);
             Fclose(fp_res);
 
-            printf("[srv](%d) stu_cli_res%d.txt is closed!\n",child_pid,child_pid);
+            bprintf(NULL,"[srv](%d) stu_cli_res%d.txt is closed!\n",child_pid,child_pid);
             exit(0);
         }
         Close(connfd);
     }
     Close(listenfd);
-    memset(buf,0,sizeof(buf));
-    sprintf(buf,"[srv](%d) listenfd is closed!\n",getpid());
-    Fputs(buf,stu_srv_res_p);
 
-    memset(buf,0,sizeof(buf));
-    sprintf(buf,"[srv](%d) parent process is going to exit!\n",getpid());
-    Fputs(buf,stu_srv_res_p);
-
+    bprintf(stu_srv_res_p,"[srv](%d) listenfd is closed!\n",getpid());
+    bprintf(stu_srv_res_p,"[srv](%d) parent process is going to exit!\n",getpid());
     Fclose(stu_srv_res_p);
-    printf("[srv])(%d) stu_srv_res_p.txt is closed!\n",getpid());
+    bprintf(NULL,"[srv])(%d) stu_srv_res_p.txt is closed!\n",getpid());
     return 0;
 }
