@@ -11,6 +11,7 @@
 
 #define MAX_CMD_STR 124
 #define LISTENQ 1024
+#define MAXLINE 8192
 
 typedef struct sockaddr *pSA ;
 
@@ -56,7 +57,7 @@ __sighandler_t *Signal(int signum,__sighandler_t sighandler){
     sigemptyset(&sigact.sa_mask);
     sigact.sa_flags = 0;
     sigact.sa_flags |= SA_RESTART;
-    if(sigaction(SIGPIPE, &sigact, &old_sigact)<0)
+    if(sigaction(signum, &sigact, &old_sigact)<0)
         unix_error("Signal error");
     return (old_sigact.sa_handler);
 }
@@ -124,7 +125,6 @@ pid_t Fork(){
     return pid;
 }
 
-
 void Rename(char *oldname, char *newname, FILE *stream, pid_t pid) {
 
     if(rename(oldname,newname)<0)
@@ -136,39 +136,63 @@ void Rename(char *oldname, char *newname, FILE *stream, pid_t pid) {
     Fwrite(buf,stream);
 }
 
+ssize_t rio_read(int fd, void *usrbuf, size_t n)
+{
+    size_t nleft = n;
+    ssize_t nread;
+    char *bufp = usrbuf;
+
+    while (nleft > 0) {
+        if ((nread = read(fd, bufp, nleft)) < 0) {
+            if (errno == EINTR) /* Interrupted by sig handler return */
+                nread = 0;      /* and call read() again */
+            else
+                return -1;      /* errno set by read() */
+        }
+        else if (nread == 0)
+            break;              /* EOF */
+        nleft -= nread;
+        bufp += nread;
+    }
+    return (n - nleft);         /* return >= 0 */
+}
+
+void Rio_read(int fd,void *userbuf,size_t n){
+    if(rio_read(fd,userbuf,n)<0)
+        unix_error("Rio_read error");
+}
+
+ssize_t rio_writen(int fd, void *usrbuf, size_t n)
+{
+    size_t nleft = n;
+    ssize_t nwritten;
+    char *bufp = usrbuf;
+
+    while (nleft > 0) {
+        if ((nwritten = write(fd, bufp, nleft)) <= 0) {
+            if (errno == EINTR)  /* Interrupted by sig handler return */
+                nwritten = 0;    /* and call write() again */
+            else
+                return -1;       /* errno set by write() */
+        }
+        nleft -= nwritten;
+        bufp += nwritten;
+    }
+    return n;
+}
+
+void Rio_writen(int fd,void *userbuf,size_t n){
+    if(rio_writen(fd,userbuf,n) != n)
+        unix_error("Rio_writen error");
+}
+
 void echo(int sockfd,FILE *fp_res,pid_t pid,int *pin) {
-    int res;
     int len;
-    char *buf;
+    char buf[MAX_CMD_STR];
 
-    if(read(sockfd,&pin,sizeof(int))<0){
-        printf("[srv](%d) read pin return %d and errno is %d\n",pid,res, errno);
-        if(errno == EINTR){
-            if(sig_type == SIGINT){
-                return;
-            }
-        }
-    }
-
-    if(read(sockfd,&len,sizeof(int))<0){
-        printf("[srv](%d) read len return %d and errno is %d\n",pid,res, errno);
-        if(errno == EINTR){
-            if(sig_type == SIGINT)
-                return;
-        }
-    }
-
-    buf = (char *)malloc(sizeof(char)*len);
-    if(read(sockfd,buf,sizeof(char)*len)<0){
-        printf("[srv](%d) read buf return %d and errno is %d\n",pid,res, errno);
-        if(errno == EINTR){
-            if(sig_type == SIGINT) {
-                free(buf);
-                return;
-            }
-        }
-        free(buf);
-    }
+    Rio_read(sockfd,&pin,sizeof(int));
+    Rio_read(sockfd,&len,sizeof(int));
+    Rio_read(sockfd,buf,sizeof(char)*len);
 
     printf("%s\n",buf);
     char buffer[MAX_CMD_STR+124];
@@ -176,25 +200,14 @@ void echo(int sockfd,FILE *fp_res,pid_t pid,int *pin) {
     sprintf(buffer,"[echo_rqt](%d) %s",pid,buf);
     Fwrite(buffer,fp_res);
 
-    if(write(sockfd,&pin,sizeof(int)) == -1){
-        printf("write echo_rqt_pdu.HEADER.PIN error \n");
-        exit(1);
-    }
-
-    if(write(sockfd,&len,sizeof(int)) == -1){
-        printf("write echo_rqt_pdu.HEADER.LEN error \n");
-        exit(1);
-    }
-
-    if(write(sockfd,&buf,sizeof(char)*len) == -1){
-        printf("write echo_rqt_pdu.BUF error \n");
-        exit(1);
-    }
+    Rio_writen(sockfd,&pin,sizeof(int));
+    Rio_writen(sockfd,&len,sizeof(int));
+    Rio_writen(sockfd,&buf,sizeof(char)*len);
 }
 
 int main(int argc,char *argv[])
 {
-    struct sockaddr_in srv_addr,cli_addr;
+    struct sockaddr_in cli_addr;
     socklen_t cli_addr_len;
     int listenfd,connfd;
 
@@ -215,7 +228,7 @@ int main(int argc,char *argv[])
     char buf[MAX_CMD_STR];
     while(!sig_to_exit)
     {
-        cli_addr_len = sizeof(cli_addr);
+        cli_addr_len = sizeof(struct sockaddr_in);
         connfd = Accept(listenfd,(pSA)&cli_addr,&cli_addr_len);
         if(connfd == -1 && errno == EINTR && sig_type == SIGINT) break;
 
