@@ -225,17 +225,29 @@ void Rio_readn(int fd,char *userbuf,size_t n)
 
 void echo(int sockfd,FILE *fp_res,pid_t pid,int *PIN)
 {
+    int pin;
+    int len;
     char buf[MAX_CMD_STR+20];
-    pdu echo_msg;
+    pdu echo_rqt_msg,echo_rep_msg;
 
     memset(buf,0,sizeof(buf));
     while(rio_readn(sockfd,buf,sizeof(buf))>0){
-        memset(&echo_msg,0,sizeof(echo_msg));
-        memcpy(&echo_msg,buf,sizeof(echo_msg));
-        echo_msg.BUFFER[ntohl(echo_msg.LEN)] = '\0';
-        bprintf(fp_res,"[echo_rqt](%d) %s",pid,echo_msg.BUFFER);
+
+        //接收echo_rqt_msg
+        memset(&echo_rqt_msg,0,sizeof(echo_rqt_msg));
+        memcpy(&echo_rqt_msg,buf,sizeof(echo_rqt_msg));
+        pin = ntohl(echo_rqt_msg.PIN);
+        len = ntohl(echo_rqt_msg.LEN);
+        echo_rqt_msg.BUFFER[len] = '\0';
+        bprintf(fp_res,"[echo_rqt](%d) %s",pid,echo_rqt_msg.BUFFER);
         //传址放到函数外去
-        *PIN = ntohl(echo_msg.PIN);
+        *PIN = pin;
+        //发送echo_rep_msg
+        echo_rep_msg.PIN = htonl(pin);
+        echo_rep_msg.LEN = htonl(len);
+        strncpy(echo_rep_msg.BUFFER,echo_rqt_msg.BUFFER,len);
+        memset(buf,0,sizeof(buf));
+        memcpy(buf,&echo_rep_msg,sizeof(echo_rep_msg));
         Rio_writen(sockfd,buf,sizeof(buf));
         memset(buf,0,sizeof(buf));
     }
@@ -267,9 +279,13 @@ int main(int argc,char **argv)
     {
         cli_addr_len = sizeof(struct sockaddr_in);
         connfd = accept(listenfd,(pSA)&cli_addr,&cli_addr_len);
-        if(connfd == -1 && errno == EINTR && sig_type == SIGINT) break;
-        if (connfd < 0) continue;
-
+        if(connfd == -1 && errno == EINTR )
+        {
+            if(sig_type == SIGINT)
+                break;
+            else
+                continue;
+        }
         memset(cli_ip,0,sizeof(cli_ip));
         inet_ntop(AF_INET, &cli_addr.sin_addr,cli_ip, sizeof(cli_ip));
         bprintf(stu_srv_res_p,"[srv](%d) client[%s:%hu] is accepted!\n",getpid(),cli_ip,ntohs(cli_addr.sin_port));
@@ -314,6 +330,6 @@ int main(int argc,char **argv)
     bprintf(stu_srv_res_p,"[srv](%d) listenfd is closed!\n",getpid());
     bprintf(stu_srv_res_p,"[srv](%d) parent process is going to exit!\n",getpid());
     Fclose(stu_srv_res_p);
-    bprintf(NULL,"[srv])(%d) stu_srv_res_p.txt is closed!\n",getpid());
+    bprintf(NULL,"[srv](%d) stu_srv_res_p.txt is closed!\n",getpid());
     return 0;
 }

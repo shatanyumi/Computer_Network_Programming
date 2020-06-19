@@ -36,6 +36,11 @@ void sig_chld(int signo)
     while(waitpid(-1, 0, WNOHANG) >0);
 }
 
+void sig_int(int signo)
+{
+}
+
+
 handler_t *Signal(int signum, handler_t *handler)
 {
     struct sigaction action, old_action;
@@ -180,8 +185,8 @@ int Open_clientfd(char *ip,char *port)
 void echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres)
 {
     char rbuf[MAX_CMD_STR+20];
-    char buf[MAX_CMD_STR+20];
-    pdu echo_pdu;
+    char buf[MAX_CMD_STR+20];//buffer
+    pdu echo_rqt_msg,echo_rep_msg;
     char td_name[50];
 
     sprintf(td_name,"td%d.txt",pin);
@@ -191,25 +196,24 @@ void echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres)
         if(strncmp(rbuf,"exit",4) == 0) break;
         int len = strnlen(rbuf,MAX_CMD_STR);
         rbuf[len] = '\0';
-        //printf("[cli](%d) send %d %d %s\n",PID,pin,len,rbuf);
-
-        //构造pdu并写入缓存
-        memset(&echo_pdu,0,sizeof(echo_pdu));
-        echo_pdu.PIN = htonl(pin);
-        echo_pdu.LEN = htonl(len);
-        strncpy(echo_pdu.BUFFER,rbuf,len);
+        //建立echo_rqt_msg并发送
+        memset(&echo_rqt_msg,0,sizeof(echo_rqt_msg));
+        echo_rqt_msg.PIN = htonl(pin);
+        echo_rqt_msg.LEN = htonl(len);
+        strncpy(echo_rqt_msg.BUFFER,rbuf,len);
         memset(buf,0,sizeof(buf));
-        memcpy(buf,&echo_pdu,sizeof(echo_pdu));
-
+        memcpy(buf,&echo_rqt_msg,sizeof(echo_rqt_msg));
         Rio_writen(sockfd,buf,sizeof(buf));
 
+        //读取并建立echo_rep_msg
         memset(buf,0,sizeof(buf));
         Rio_readn(sockfd,buf,sizeof(buf));
-        memset(&echo_pdu,0,sizeof(echo_pdu));
-        memcpy(&echo_pdu,buf,sizeof(echo_pdu));
-        echo_pdu.BUFFER[ntohl(echo_pdu.LEN)] = '\0';
-
-        bprintf(fnres,"[echo_rep](%d) %s",PID,echo_pdu.BUFFER);
+        memset(&echo_rep_msg,0,sizeof(echo_rep_msg));
+        memcpy(&echo_rep_msg,buf,sizeof(echo_rep_msg));
+        pin = ntohl(echo_rep_msg.PIN);
+        len = ntohl(echo_rep_msg.LEN);
+        echo_rep_msg.BUFFER[len] = '\0';
+        bprintf(fnres,"[echo_rep](%d) %s",PID,echo_rep_msg.BUFFER);
     }
     Fclose(fp);
 }
@@ -220,6 +224,8 @@ int main(int argc,char **argv)
     //最大并发数目
 
     Signal(SIGCHLD,sig_chld);
+    Signal(SIGINT,sig_int);
+    
     int mutl_num = 0;
     if(argc != 4)
     {
@@ -230,7 +236,7 @@ int main(int argc,char **argv)
     ip = argv[1];
     port = argv[2];
     mutl_num = atoi(argv[3]);
-
+    
     pid_t pid;
     int pin;
     for(pin= mutl_num-1;pin>0;pin--)
@@ -247,23 +253,20 @@ int main(int argc,char **argv)
     else if(pid == 0)
     {
         pid_t PID = getpid();
-
+        
         char file_name[50];
         sprintf(file_name,"stu_cli_res_%d.txt",pin);
         FILE *fnres = Fopen(file_name,"w");
         printf("[cli](%d) %s is created!\n",PID,file_name);
-
         bprintf(fnres,"[cli](%d) child process %d is created!\n",PID,pin);
-
-        int client_fd = Open_clientfd(ip,port);
-
-        bprintf(fnres,"[cli](%d) server[%s:%s] is connected!\n",PID,ip,port);
-
-        echo_rqt(client_fd,pin,PID,fnres);
-
-        Close(client_fd);
+        
+        int clientfd = Open_clientfd(ip,port);
+        bprintf(fnres, "[cli](%d) server[%s:%s] is connected!\n", PID, ip, port);
+        
+        echo_rqt(clientfd, pin, PID, fnres);
+        
+        Close(clientfd);
         bprintf(fnres,"[cli](%d) connfd is closed!\n",PID);
-
         bprintf(fnres,"[cli](%d) child process is going to exit!\n",PID);
         Fclose(fnres);
         printf("[cli](%d) %s is closed!\n",PID,file_name);
@@ -277,18 +280,15 @@ int main(int argc,char **argv)
         sprintf(file_name,"stu_cli_res_%d.txt",pin);
         FILE *fnres = Fopen(file_name,"w");
         printf("[cli](%d) %s is created!\n",PID,file_name);
-
         bprintf(fnres,"[cli](%d) child process %d is created!\n",PID,pin);
 
-        int client_fd = Open_clientfd(ip,port);
+        int clientfd = Open_clientfd(ip,port);
+        bprintf(fnres, "[cli](%d) server[%s:%s] is connected!\n", PID, ip, port);
 
-        bprintf(fnres,"[cli](%d) server[%s:%s] is connected!\n",PID,ip,port);
+        echo_rqt(clientfd, pin, PID, fnres);
 
-        echo_rqt(client_fd,pin,PID,fnres);
-
-        Close(client_fd);
+        Close(clientfd);
         bprintf(fnres,"[cli](%d) connfd is closed!\n",PID);
-
         bprintf(fnres,"[cli](%d) parent process is going to exit!\n",PID);
         Fclose(fnres);
         printf("[cli](%d) %s is closed!\n",PID,file_name);
