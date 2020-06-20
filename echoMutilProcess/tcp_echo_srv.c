@@ -177,10 +177,10 @@ ssize_t rio_readn(int fd, void *usrbuf, size_t n)
 
     while (nleft > 0) {
         if ((nread = read(fd, bufp, nleft)) < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) /* Interrupted by sig handler return */
                 nread = 0;      /* and call read() again */
-            else                /* Interrupted by sig handler return */
-                return -1;/* errno set by read() */
+            else
+                return -1;      /* errno set by read() */
         }
         else if (nread == 0)
             break;              /* EOF */
@@ -199,11 +199,10 @@ ssize_t rio_writen(int fd, void *usrbuf, size_t n)
 
     while (nleft > 0) {
         if ((nwritten = write(fd, bufp, nleft)) <= 0) {
-            if (errno == EINTR)
-                nwritten = 0;      /* and call read() again */
-                                    /* Interrupted by sig handler return */
+            if (errno == EINTR)  /* Interrupted by sig handler return */
+                nwritten = 0;    /* and call write() again */
             else
-                return -1; /* errno set by read() */
+                return -1;       /* errno set by write() */
         }
         nleft -= nwritten;
         bufp += nwritten;
@@ -230,8 +229,21 @@ void echo(int sockfd,FILE *fp_res,pid_t pid,int *PIN)
     pdu echo_rqt_msg,echo_rep_msg;
     char buf[sizeof(struct PDU)];
 
-    memset(buf,0,sizeof(struct PDU));
-    while(rio_readn(sockfd,(void*)buf,sizeof(struct PDU))>0){
+    do{
+        memset(buf,0,sizeof(struct PDU));
+        do{
+            int res = read(sockfd,buf,sizeof(struct PDU));
+            if(res<0){
+                if(errno == EINTR){
+                    if(sig_type == SIGINT){
+                        return;
+                    }
+                }
+                continue;
+            }
+            if(res ==0 ) return;
+            break;
+        }while(1);
 
         //接收echo_rqt_msg
         memset(&echo_rqt_msg,0,sizeof(echo_rqt_msg));
@@ -239,8 +251,8 @@ void echo(int sockfd,FILE *fp_res,pid_t pid,int *PIN)
 
         pin = ntohl(echo_rqt_msg.PIN);
         len = ntohl(echo_rqt_msg.LEN);
-        echo_rqt_msg.BUFFER[len] = '\0';
-        bprintf(fp_res,"[echo_rqt](%d) %s",pid,echo_rqt_msg.BUFFER);
+        //echo_rqt_msg.BUFFER[len] = '\0';
+        bprintf(fp_res,"[echo_rqt](%d) %s\n",pid,echo_rqt_msg.BUFFER);
         //传址放到函数外去
         *PIN = pin;
         //发送echo_rep_msg
@@ -249,9 +261,8 @@ void echo(int sockfd,FILE *fp_res,pid_t pid,int *PIN)
         strcpy(echo_rep_msg.BUFFER,echo_rqt_msg.BUFFER);
         memset(buf,0,sizeof(struct PDU));
         memcpy(buf,&echo_rep_msg,sizeof(struct PDU));
-        Rio_writen(sockfd,(void *)buf,sizeof(struct PDU));
-        memset(buf,0,sizeof(struct PDU));
-    }
+        write(sockfd,buf,sizeof(struct PDU));
+    }while(1);
 }
 
 int main(int argc,char **argv)
@@ -280,13 +291,8 @@ int main(int argc,char **argv)
     {
         cli_addr_len = sizeof(struct sockaddr_in);
         connfd = accept(listenfd,(pSA)&cli_addr,&cli_addr_len);
-        if(connfd == -1 && errno == EINTR )
-        {
-            if(sig_type == SIGINT)
-                break;
-            else
-                continue;
-        }
+        if(connfd <0 ) continue;
+
         memset(cli_ip,0,sizeof(cli_ip));
         inet_ntop(AF_INET, &cli_addr.sin_addr,cli_ip, sizeof(cli_ip));
         bprintf(stu_srv_res_p,"[srv](%d) client[%s:%hu] is accepted!\n",getpid(),cli_ip,ntohs(cli_addr.sin_port));

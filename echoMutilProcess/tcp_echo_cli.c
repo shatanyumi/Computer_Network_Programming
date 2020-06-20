@@ -17,6 +17,7 @@
 
 typedef struct sockaddr *pSA ;
 typedef void handler_t(int);
+int sig_type = 0;
 
 //直接用结构体构造pdu，利用内存的连续做序列化
 typedef struct PDU{
@@ -33,11 +34,13 @@ void unix_error(char *msg)
 
 void sig_chld(int signo)
 {
+    sig_type = signo;
     while(waitpid(-1, 0, WNOHANG) >0);
 }
 
 void sig_int(int signo)
 {
+    sig_type = signo;
 }
 
 
@@ -110,10 +113,10 @@ ssize_t rio_readn(int fd, void *usrbuf, size_t n)
 
     while (nleft > 0) {
         if ((nread = read(fd, bufp, nleft)) < 0) {
-            if (errno == EINTR)
+            if (errno == EINTR) /* Interrupted by sig handler return */
                 nread = 0;      /* and call read() again */
-            else                /* Interrupted by sig handler return */
-                return -1;/* errno set by read() */
+            else
+                return -1;      /* errno set by read() */
         }
         else if (nread == 0)
             break;              /* EOF */
@@ -132,11 +135,12 @@ ssize_t rio_writen(int fd, void *usrbuf, size_t n)
 
     while (nleft > 0) {
         if ((nwritten = write(fd, bufp, nleft)) <= 0) {
-            if (errno == EINTR)
-                nwritten = 0;      /* and call read() again */
-                /* Interrupted by sig handler return */
-            else
-                return -1; /* errno set by read() */
+            if (errno == EINTR){
+                nwritten = 0;
+                if(sig_type == SIGINT)
+                    return -1;
+                continue;
+            }
         }
         nleft -= nwritten;
         bufp += nwritten;
@@ -193,9 +197,12 @@ void echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres)
     FILE *fp = Fopen(td_name,"r");
 
     while (fgets(rbuf, sizeof(rbuf),fp)!=NULL) {
-        if(strncmp(rbuf,"exit",4) == 0) break;
+        if(strncmp(rbuf,"exit",4) == 0){
+            Fclose(fp);
+            return;
+        }
         int len = strnlen(rbuf,MAX_CMD_STR);
-        rbuf[len] = '\0';
+        //rbuf[len] = '\0';
         //建立echo_rqt_msg并发送
         memset(&echo_rqt_msg,0,sizeof(struct PDU));
         echo_rqt_msg.PIN = htonl(pin);
@@ -203,17 +210,17 @@ void echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres)
         strcpy(echo_rqt_msg.BUFFER,rbuf);
         memset(buf,0,sizeof(struct PDU));
         memcpy(buf,&echo_rqt_msg,sizeof(struct PDU));
-        Rio_writen(sockfd,(void *)buf,sizeof(buf));
+        write(sockfd,buf,sizeof(buf));
 
         //读取并建立echo_rep_msg
         memset(buf,0,sizeof(struct PDU));
-        Rio_readn(sockfd,(void *)buf,sizeof(struct PDU));
+        read(sockfd,buf,sizeof(struct PDU));
         memset(&echo_rep_msg,0,sizeof(struct PDU));
         memcpy(&echo_rep_msg,buf,sizeof(struct PDU));
         pin = ntohl(echo_rep_msg.PIN);
         len = ntohl(echo_rep_msg.LEN);
-        echo_rep_msg.BUFFER[len] = '\0';
-        bprintf(fnres,"[echo_rep](%d) %s",PID,echo_rep_msg.BUFFER);
+        //echo_rep_msg.BUFFER[len] = '\0';
+        bprintf(fnres,"[echo_rep](%d) %s\n",PID,echo_rep_msg.BUFFER);
     }
     Fclose(fp);
 }
@@ -236,7 +243,7 @@ int main(int argc,char **argv)
     ip = argv[1];
     port = argv[2];
     mutl_num = atoi(argv[3]);
-    
+
     pid_t pid;
     int pin;
     for(pin= mutl_num-1;pin>0;pin--)
