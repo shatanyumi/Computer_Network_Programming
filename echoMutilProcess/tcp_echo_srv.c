@@ -20,7 +20,7 @@ typedef struct sockaddr *pSA ;
 typedef void handler_t(int);
 
 //直接构造pdu，利用内存的连续做序列化
-typedef struct {
+typedef struct PDU{
     int PIN;
     int LEN;
     char BUFFER[MAX_CMD_STR];
@@ -227,15 +227,16 @@ void echo(int sockfd,FILE *fp_res,pid_t pid,int *PIN)
 {
     int pin;
     int len;
-    char buf[MAX_CMD_STR+20];
     pdu echo_rqt_msg,echo_rep_msg;
+    char buf[sizeof(struct PDU)];
 
-    memset(buf,0,sizeof(buf));
-    while(rio_readn(sockfd,buf,sizeof(buf))>0){
+    memset(buf,0,sizeof(struct PDU));
+    while(rio_readn(sockfd,(void*)buf,sizeof(struct PDU))>0){
 
         //接收echo_rqt_msg
         memset(&echo_rqt_msg,0,sizeof(echo_rqt_msg));
-        memcpy(&echo_rqt_msg,buf,sizeof(echo_rqt_msg));
+        memcpy(&echo_rqt_msg,buf,sizeof(struct PDU));
+
         pin = ntohl(echo_rqt_msg.PIN);
         len = ntohl(echo_rqt_msg.LEN);
         echo_rqt_msg.BUFFER[len] = '\0';
@@ -245,11 +246,11 @@ void echo(int sockfd,FILE *fp_res,pid_t pid,int *PIN)
         //发送echo_rep_msg
         echo_rep_msg.PIN = htonl(pin);
         echo_rep_msg.LEN = htonl(len);
-        strncpy(echo_rep_msg.BUFFER,echo_rqt_msg.BUFFER,len);
-        memset(buf,0,sizeof(buf));
-        memcpy(buf,&echo_rep_msg,sizeof(echo_rep_msg));
-        Rio_writen(sockfd,buf,sizeof(buf));
-        memset(buf,0,sizeof(buf));
+        strcpy(echo_rep_msg.BUFFER,echo_rqt_msg.BUFFER);
+        memset(buf,0,sizeof(struct PDU));
+        memcpy(buf,&echo_rep_msg,sizeof(struct PDU));
+        Rio_writen(sockfd,(void *)buf,sizeof(struct PDU));
+        memset(buf,0,sizeof(struct PDU));
     }
 }
 
