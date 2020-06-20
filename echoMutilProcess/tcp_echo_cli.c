@@ -10,6 +10,8 @@
 #include <arpa/inet.h>
 
 #define MAX_CMD_STR 124
+#define MAX_BUF_SIZE 8192
+
 #define bprintf(fp,format,...)\
         if(fp==NULL){printf(format,##__VA_ARGS__);}\
         else {printf(format,##__VA_ARGS__);\
@@ -154,7 +156,7 @@ void Rio_writen(int fd,void *userbuf,size_t n)
         unix_error("Rio_writen error");
 }
 
-void Rio_readn(int fd,char *userbuf,size_t n)
+void Rio_readn(int fd,void *userbuf,size_t n)
 {
     if(rio_readn(fd,userbuf,n)<0)
         unix_error("Rio_read error");
@@ -186,10 +188,9 @@ int Open_clientfd(char *ip,char *port)
     return rc;
 }
 
-void echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres)
+void echo_rqt(int sockfd,int pin,pid_t pid,FILE *fnres)
 {
     char rbuf[MAX_CMD_STR+20];
-    char buf[sizeof(struct  PDU)];//buffer
     pdu echo_rqt_msg,echo_rep_msg;
 
     char td_name[50];
@@ -197,30 +198,26 @@ void echo_rqt(int sockfd,int pin,pid_t PID,FILE *fnres)
     FILE *fp = Fopen(td_name,"r");
 
     while (fgets(rbuf, sizeof(rbuf),fp)!=NULL) {
-        if(strncmp(rbuf,"exit",4) == 0){
-            Fclose(fp);
-            return;
-        }
+        if(strncmp(rbuf,"exit",4) == 0) break;
         int len = strnlen(rbuf,MAX_CMD_STR);
-        //rbuf[len] = '\0';
+        rbuf[len] = '\0';
+
         //建立echo_rqt_msg并发送
-        memset(&echo_rqt_msg,0,sizeof(struct PDU));
         echo_rqt_msg.PIN = htonl(pin);
         echo_rqt_msg.LEN = htonl(len);
         strcpy(echo_rqt_msg.BUFFER,rbuf);
-        memset(buf,0,sizeof(struct PDU));
-        memcpy(buf,&echo_rqt_msg,sizeof(struct PDU));
-        write(sockfd,buf,sizeof(buf));
+        Rio_writen(sockfd,&echo_rqt_msg,sizeof(int)+sizeof(int)+len);
 
         //读取并建立echo_rep_msg
-        memset(buf,0,sizeof(struct PDU));
-        read(sockfd,buf,sizeof(struct PDU));
-        memset(&echo_rep_msg,0,sizeof(struct PDU));
-        memcpy(&echo_rep_msg,buf,sizeof(struct PDU));
+        Rio_readn(sockfd,&echo_rep_msg.PIN,sizeof(echo_rep_msg.PIN));
+        Rio_readn(sockfd,&echo_rep_msg.LEN,sizeof(echo_rep_msg.LEN));
         pin = ntohl(echo_rep_msg.PIN);
         len = ntohl(echo_rep_msg.LEN);
-        //echo_rep_msg.BUFFER[len] = '\0';
-        bprintf(fnres,"[echo_rep](%d) %s\n",PID,echo_rep_msg.BUFFER);
+        Rio_readn(sockfd,echo_rep_msg.BUFFER,sizeof(char)*len);
+        echo_rep_msg.BUFFER[len] = '\0';
+
+        bprintf(fnres,"[echo_rep](%d) %s\n",pid,echo_rep_msg.BUFFER);
+
     }
     Fclose(fp);
 }

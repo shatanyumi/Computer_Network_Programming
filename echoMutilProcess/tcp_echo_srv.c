@@ -11,6 +11,8 @@
 
 #define MAX_CMD_STR 124
 #define LISTENQ 1024
+#define MAX_BUF_SIZE 8192
+
 #define bprintf(fp,format,...)\
         if(fp==NULL){printf(format,##__VA_ARGS__);}\
         else {printf(format,##__VA_ARGS__);\
@@ -215,7 +217,7 @@ void Rio_writen(int fd,void *userbuf,size_t n)
     if(rio_writen(fd,userbuf,n) != n)
         unix_error("Rio_writen error");
 }
-void Rio_readn(int fd,char *userbuf,size_t n)
+void Rio_readn(int fd,void *userbuf,size_t n)
 {
     if(rio_readn(fd,userbuf,n)<0)
         unix_error("Rio_read error");
@@ -227,42 +229,25 @@ void echo(int sockfd,FILE *fp_res,pid_t pid,int *PIN)
     int pin;
     int len;
     pdu echo_rqt_msg,echo_rep_msg;
-    char buf[sizeof(struct PDU)];
+    //收到echo_rqt_msg后转化
+    memset(&echo_rqt_msg,0,sizeof(echo_rqt_msg));
+    while (rio_readn(sockfd,&echo_rqt_msg.PIN,sizeof(int))>0){
+        memset(&echo_rep_msg,0,sizeof(echo_rep_msg));
 
-    do{
-        memset(buf,0,sizeof(struct PDU));
-        do{
-            int res = read(sockfd,buf,sizeof(struct PDU));
-            if(res<0){
-                if(errno == EINTR){
-                    if(sig_type == SIGINT){
-                        return;
-                    }
-                }
-                continue;
-            }
-            if(res ==0 ) return;
-            break;
-        }while(1);
-
-        //接收echo_rqt_msg
-        memset(&echo_rqt_msg,0,sizeof(echo_rqt_msg));
-        memcpy(&echo_rqt_msg,buf,sizeof(struct PDU));
-
+        Rio_readn(sockfd,&echo_rqt_msg.LEN,sizeof(int));
         pin = ntohl(echo_rqt_msg.PIN);
         len = ntohl(echo_rqt_msg.LEN);
-        //echo_rqt_msg.BUFFER[len] = '\0';
+        Rio_readn(sockfd,echo_rqt_msg.BUFFER,sizeof(char)*len);
+        echo_rqt_msg.BUFFER[len] = '\0';
         bprintf(fp_res,"[echo_rqt](%d) %s\n",pid,echo_rqt_msg.BUFFER);
-        //传址放到函数外去
+
+        //pin通过引用发送到函数外
         *PIN = pin;
-        //发送echo_rep_msg
-        echo_rep_msg.PIN = htonl(pin);
-        echo_rep_msg.LEN = htonl(len);
-        strcpy(echo_rep_msg.BUFFER,echo_rqt_msg.BUFFER);
-        memset(buf,0,sizeof(struct PDU));
-        memcpy(buf,&echo_rep_msg,sizeof(struct PDU));
-        write(sockfd,buf,sizeof(struct PDU));
-    }while(1);
+        //echo_rep_msg发送
+        echo_rep_msg = echo_rqt_msg;
+        Rio_writen(sockfd,&echo_rep_msg,sizeof(int)+sizeof(int)+len);
+        memset(&echo_rqt_msg,0,sizeof(echo_rqt_msg));
+    }
 }
 
 int main(int argc,char **argv)
